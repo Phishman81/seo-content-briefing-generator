@@ -1,14 +1,9 @@
-# Filename: app.py
-
 import streamlit as st
 import openai
 import pandas as pd
-
 import requests
 from bs4 import BeautifulSoup
-from newspaper import Article
 from googlesearch import search
-
 import io
 
 ############################
@@ -25,7 +20,6 @@ erhalte auf Basis der KI-Analyse (und Benchmarking) ein fertiges Texter-Briefing
 """)
 
 # Setup OpenAI API-Key aus Streamlit Secrets
-#   -> Füge deinen Key in den Streamlit Cloud Secrets ein (Settings -> Secrets)
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 
@@ -33,11 +27,8 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 # 1️⃣ Eingabeoptionen
 #################################
 
-# Eingabefelder für URL und/oder Text
 url_input = st.text_input("Website-URL (optional):", "")
 text_input = st.text_area("Oder füge deinen Artikeltext hier ein (optional):", height=200)
-
-# Zusätzliche optionale Felder
 zielgruppe = st.text_input("Zielgruppe (optional):", "")
 ziel_des_artikels = st.text_input("Ziel des Artikels (optional):", "")
 fokus_keyword = st.text_input("Fokus-Keyword (optional):", "")
@@ -55,32 +46,35 @@ if uploaded_file is not None:
 
 
 ##################################
-# 2️⃣ Analyse-Phase 1: Content & SEO-Analyse
+# 2️⃣ Content & SEO-Analyse
 ##################################
 
 def extract_text_from_url(url):
     """
-    Extrahiert Artikeltext aus einer URL mit Newspaper3k.
-    Fallback mit BeautifulSoup, falls Newspaper fehlschlägt.
+    Extrahiert den Haupttext einer Webseite mit BeautifulSoup.
     """
     try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text
-    except Exception as e:
-        # Backup-Methode: requests + BeautifulSoup
-        try:
-            resp = requests.get(url)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            return soup.get_text(separator=' ')
-        except:
-            return ""
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Versuche den Hauptinhalt aus <article>, <p>, oder einer anderen relevanten Struktur zu extrahieren
+        main_content = soup.find('article')
+        if main_content:
+            return main_content.get_text(separator=' ')
+
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            return " ".join([p.get_text() for p in paragraphs])
+
+        return soup.get_text(separator=' ')
+
+    except requests.exceptions.RequestException as e:
+        return f"Fehler beim Abrufen der URL: {e}"
 
 def analyze_content_with_openai(content, meta_info=None):
     """
     Erste Analyse des Artikels/Texts mit GPT.
-    meta_info kann Infos wie Zielgruppe, Fokus-Keyword etc. enthalten.
     """
     system_msg = "Du bist ein SEO-Experte und hilfst mir, Text auf Optimierungspotenzial zu analysieren."
     user_msg = f"Hier ist ein Artikeltext:\n\n{content}\n\n"
@@ -90,7 +84,7 @@ def analyze_content_with_openai(content, meta_info=None):
     user_msg += "\nBitte fasse Stärken/Schwächen zusammen und identifiziere SEO-Optimierungspotenziale."
 
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg}
@@ -122,7 +116,7 @@ if st.button("Jetzt analysieren"):
 
 
 ##################################
-# 3️⃣ Analyse-Phase 2: Web-Recherche & Benchmarking
+# 3️⃣ Web-Recherche & Benchmarking
 ##################################
 
 def perform_google_search(query, num_results=5):
@@ -147,70 +141,13 @@ def extract_competitor_data(urls):
         texts.append({"url": u, "text": txt, "word_count": len(txt.split())})
     return texts
 
-def benchmark_analysis_with_openai(own_content, competitors_info, meta_info=None):
-    """
-    Erzeugt eine Benchmark-Analyse mit GPT. Schickt KI: eigenen Content + Infos zu den Konkurrenztexten.
-    """
-    system_msg = "Du bist ein erfahrener SEO und Content-Analyst. Du vergleichst mehrere Texte zu demselben Thema."
-    
-    competitor_summaries = ""
-    for c in competitors_info:
-        competitor_summaries += f"URL: {c['url']}\nWortanzahl: {c['word_count']}\nTextauszug:\n{c['text'][:1000]}\n\n"
-    
-    user_msg = f"""Mein eigener Artikeltext:
-    {own_content[:1500]}
-
-    Hier sind Auszüge aus Artikeln, die in Google top ranken:
-    {competitor_summaries}
-
-    Bitte vergleiche meinen Artikel mit diesen Top-Artikeln:
-    - Welche inhaltlichen Themen decken die Wettbewerber ab, die mir fehlen?
-    - Welche Textlänge, Keyword-Fokus, Struktur sind bei den Top-Artikeln üblich?
-    - Wo siehst du Content-Gaps?
-    """
-    if meta_info:
-        user_msg += f"\nZusätzliche Meta-Infos: {meta_info}\n"
-
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg}
-        ],
-        temperature=0.7,
-        max_tokens=1000
-    )
-    return response.choices[0].message["content"]
-
-benchmark_result = None
-if analysis_result:  # Nur ausführen, wenn schon eine Analyse da ist
-    with st.expander("Optional: Benchmark-Analyse starten"):
-        st.write("Basierend auf deinem Fokus-Keyword wird nach Konkurrenz-Artikeln gesucht.")
-        st.write("Achtung: Google-Scraping kann fehleranfällig sein. Nutze es verantwortungsvoll.")
-        benchmark_trigger = st.button("Benchmark durchführen")
-        if benchmark_trigger:
-            if not fokus_keyword:
-                st.warning("Bitte gib ein Fokus-Keyword an, damit die Benchmark-Suche durchgeführt werden kann.")
-            else:
-                with st.spinner("Suche nach Top-Artikeln..."):
-                    competitor_urls = perform_google_search(fokus_keyword, num_results=3)
-                    st.write("Gefundene Top-URLs:", competitor_urls)
-                    competitor_texts = extract_competitor_data(competitor_urls)
-                with st.spinner("Vergleiche Inhalte mit OpenAI..."):
-                    meta_info_2 = f"Fokus-Keyword: {fokus_keyword}"
-                    benchmark_result = benchmark_analysis_with_openai(content_to_analyze, competitor_texts, meta_info_2)
-                    st.subheader("Ergebnisse der Benchmark-Analyse")
-                    st.write(benchmark_result)
-
-
 ##################################
 # 4️⃣ Erstellung des Texter-Briefings
 ##################################
 
 def generate_seo_briefing(own_content, initial_analysis, benchmark_analysis, keywords_df, meta_info=None):
     """
-    Generiert ein zusammenhängendes SEO-Briefing, das alle Infos (eigener Artikel, 
-    Benchmark, Keyword-Daten) einbezieht.
+    Generiert ein zusammenhängendes SEO-Briefing.
     """
     system_msg = "Du bist ein professioneller SEO-Briefing-Assistent."
     user_msg = f"""
@@ -225,8 +162,6 @@ def generate_seo_briefing(own_content, initial_analysis, benchmark_analysis, key
 
     """
     if keywords_df is not None:
-        # Füge eine kompakte Darstellung der Keyword-Daten in den Prompt ein
-        # Nur Top 10 Zeilen, um den Prompt nicht zu sprengen
         df_head = keywords_df.head(10)
         kw_string = df_head.to_csv(index=False)
         user_msg += f"\nHier sind einige relevante Keywords mit Suchvolumen:\n{kw_string}\n"
@@ -243,11 +178,10 @@ def generate_seo_briefing(own_content, initial_analysis, benchmark_analysis, key
     4. Keyword-Empfehlungen (Fokus und Nebenkeywords) inkl. Platzierung
     5. Aktualisierungen auf Basis aktueller Trends/Infos
     6. Weitere SEO-Hinweise (z.B. Meta-Daten, interne Verlinkung, EEAT)
-
-    Das Briefing soll so geschrieben sein, dass ein Texter es direkt umsetzen kann.
     """
+
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4",
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg}
@@ -263,8 +197,7 @@ if st.button("SEO-Briefing generieren"):
         st.error("Bitte zuerst eine Analyse durchführen.")
     else:
         with st.spinner("Generiere dein SEO-Briefing..."):
-            # Optional: Benchmark-Analyse Einbindung (wenn vorhanden)
-            benchmark_info = benchmark_result if benchmark_result else ""
+            benchmark_info = ""
             meta_info_3 = f"Zielgruppe: {zielgruppe}, Ziel des Artikels: {ziel_des_artikels}, Fokus-Keyword: {fokus_keyword}"
             final_briefing = generate_seo_briefing(
                 content_to_analyze,
@@ -275,7 +208,6 @@ if st.button("SEO-Briefing generieren"):
             )
         st.subheader("Dein SEO-Briefing")
         st.write(final_briefing)
-        # Optional: Download-Button
         briefing_bytes = final_briefing.encode('utf-8')
         st.download_button(
             label="Briefing als TXT herunterladen",
